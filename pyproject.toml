@@ -1,0 +1,20 @@
+[project]
+name = "sscam"
+version = "0.1.0"
+description = "Webcam body-gesture controller for Subway Surfers in the Android emulator"
+requires-python = ">=3.11"
+dependencies = ["mediapipe>=0.10.20", "opencv-contrib-python", "numpy", "pyyaml", "grpcio", "protobuf",
+                "uiautomator2", "adbutils", "pyautogui", "pytest"]
+
+[project.scripts]
+sscam = "sscam.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

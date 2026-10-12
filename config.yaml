@@ -1,0 +1,127 @@
+# Subway Surfers camera controller — every tunable lives here.
+#
+# Units: body offsets are measured in "torso lengths" (distance between the
+# shoulder midpoint and the hip midpoint at calibration), so the same numbers
+# work whether you stand 1.5 m or 3 m from the camera.
+# Velocities are torso lengths per second.
+
+camera:
+  index: 0                 # cv2.VideoCapture index (0 = built-in FaceTime camera)
+  width: 1280
+  height: 720
+  fps: 60                  # requested; the camera may deliver less (shown in preview)
+  mirror: true             # flip horizontally so "your left" is "screen left"
+  inference_width: 640     # frame is downscaled to this width before pose inference
+
+pose:
+  model: models/pose_landmarker_lite.task   # lite = fastest; full = more stable but slower
+  min_detection_confidence: 0.5
+  min_presence_confidence: 0.5
+  min_tracking_confidence: 0.5
+  min_visibility: 0.5      # shoulders and hips must be at least this visible
+  lost_reset_s: 0.25       # pose missing longer than this -> filters reset (no velocity spike on reacquire)
+
+calibration:
+  duration_s: 2.0          # how long you must stand still in your play position
+  max_jitter: 0.06         # std-dev of torso centre (torso lengths) allowed while calibrating
+  min_torso_px: 40         # refuse to calibrate if you are tiny in frame (too far away)
+
+filter:                    # One-Euro filter on torso centre: low jitter when still, low lag when moving
+  min_cutoff_hz: 2.5       # lower = smoother when still (more lag)
+  beta: 0.5                # higher = less lag during fast movement
+  d_cutoff_hz: 4.0         # smoothing of the velocity estimate
+
+# Left/right control:
+#   lanes: the camera frame is split into thirds; the third your torso is in IS your lane. Crossing a
+#          line sends one swipe, so moving from the left third to the right third sends two. The
+#          controller keeps the game's lane in step (re-synced to the middle lane at each run start).
+#   lean:  each lean/step (relative to your calibrated position) is one lane change, then you return.
+lateral_mode: lanes
+lanes:
+  boundaries: [0.333, 0.667]  # lane lines as fractions of frame width (narrow the middle lane: [0.38, 0.62])
+  hysteresis: 0.03            # projected position must be this far past a line (fraction of width) - no flicker
+  lead: 0.04                  # a fast move may switch this far BEFORE reaching the line (fires early)
+  resync_delay_s: 1.0         # after a run starts (runner in the middle lane), wait out the intro, then match your lane
+
+# Jump/duck (and left/right in lean mode). A gesture fires when ALL of:
+#   offset >= min_offset                         (you have actually started moving)
+#   velocity >= min_velocity toward that side    (it is a deliberate movement, not drift)
+#   offset + velocity * lookahead_s >= trigger   (projected position — fires at the START of the move)
+# then that gesture is latched until you come back below min(release, half of how far you went).
+# Values tuned on a recorded session (logs/tuning*.jsonl, bench/score_guided.py) on 2026-10-12.
+lookahead_s: 0.12
+
+gestures:
+  left:
+    trigger: 0.32
+    min_offset: 0.1
+    min_velocity: 0.8
+    release: 0.3
+    cooldown_s: 0.30
+  right:
+    trigger: 0.32
+    min_offset: 0.1
+    min_velocity: 0.8
+    release: 0.3
+    cooldown_s: 0.30
+  jump:                    # body rises above baseline
+    trigger: 0.18
+    min_offset: 0.06
+    min_velocity: 0.8
+    release: 0.10
+    cooldown_s: 0.45
+  duck:                    # body drops below baseline
+    trigger: 0.34
+    min_offset: 0.15
+    min_velocity: 0.8
+    release: 0.12
+    cooldown_s: 0.45
+
+# After a jump fires, ignore duck for this long (the landing knee-bend is not a duck).
+vertical_cross_block_s: 0.55
+# After a duck fires, ignore jump for this long. 0 = a jump may follow immediately: the dip before a
+# jump can look like the start of a duck, and in the game a jump just cancels the roll.
+duck_blocks_jump_s: 0.0
+# A vertical gesture needs |vertical velocity| >= ratio * |horizontal velocity| (and vice versa),
+# so a sideways lean that sags a little does not fire a duck.
+axis_dominance: 0.6
+
+# Baseline slowly follows you while nothing is latched and you move slower than
+# baseline_adapt_max_velocity — absorbs slow drift / posture changes, never a real gesture.
+baseline_adapt_tau_s: 3.0
+baseline_adapt_max_velocity: 0.35
+
+injector:
+  method: emu_console      # chosen by bench/benchmark_injection.py — see benchmark_results.md
+  fallback: scrcpy         # used if the primary method fails to start
+  serial: emulator-5554
+  console_port: 5554
+  swipe:
+    center_x: 0.50         # fraction of screen width
+    center_y: 0.60         # fraction of screen height
+    length: 0.28           # swipe length as a fraction of screen width (same pixel length for all 4 directions)
+    # Tuned in the real game (evidence/game_A60_run*.png): Subway Surfers (Unity) samples touches
+    # once per rendered frame, so finger travel must span >= ~2 frames. An 8 ms flick was missed;
+    # 40 ms travel + 16 ms hold registered 11/11 at 60 fps. 24 ms / 3 steps / 16 ms hold also
+    # registered 12/12 (about 5 ms faster) but has less margin when the game drops a frame.
+    duration_ms: 40        # DOWN -> last MOVE (finger travel time)
+    steps: 5               # MOVE events between DOWN and the end point
+    hold_ms: 16            # finger rests at the end point this long before UP
+
+# Only send swipes while a run is actually in progress (the in-run pause button is visible).
+# Menus/dialogs have buttons where swipes land — e.g. the "Continue?" watch-an-ad button sits
+# at screen centre. Fails closed: if the state is older than max_age_s, swipes are suppressed.
+game_gate:
+  enabled: true
+  template: assets/pause_button.png
+  threshold: 0.75          # template-match score (0..1) needed to count as "in a run"
+  interval_s: 0.10         # how often to check (gRPC screenshot ~3-8 ms)
+  max_age_s: 0.8
+
+# Preview window placement (screen points). It sits to the RIGHT of the emulator window, which
+# scripts/start_emulator.sh parks at the top-left: macOS throttles the emulator to ~12-15 fps
+# when its window is covered, and runs it at 60 fps when visible.
+preview:
+  x: 470
+  y: 40
+  width: 1240

@@ -1,0 +1,19 @@
+# Environment and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Downloaded by scripts/setup.sh
+models/*.task
+
+# Built by tools/swipetest/build.sh
+tools/swipetest/build/
+tools/swipetest/*.apk
+tools/swipetest/*.idsig
+
+# Local session output (recorded landmark sessions, emulator logs, screenshots)
+logs/
+evidence/
+*.egg-info/
