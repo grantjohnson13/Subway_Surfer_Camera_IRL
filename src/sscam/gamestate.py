@@ -26,7 +26,7 @@ os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 import grpc  # noqa: E402
 import numpy as np
 
-from .config import GameGateCfg, resolve
+from .config import GameGateCfg, StartCfg, resolve
 from .emu_grpc import emulator_controller_pb2 as pb
 from .emu_grpc import emulator_controller_pb2_grpc as rpc
 from .injectors import ADB
@@ -93,6 +93,8 @@ class GameStateWatcher:
         self.tpl = cv2.resize(tpl, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
         self.roi = (int(w * self.SCALE * 0.3), int(h * self.SCALE * 0.16))  # top-left corner
         self.in_run = False
+        self.run_starts: list[float] = []   # perf_counter times at which a run was seen to start
+        self._last_grab = None
         self.score = 0.0
         self.updated = 0.0
         self.grab_ms = 0.0
@@ -111,7 +113,11 @@ class GameStateWatcher:
         rw, rh = self.roi
         roi = cv2.cvtColor(img[:rh, :rw], cv2.COLOR_BGR2GRAY)
         self.score = float(cv2.matchTemplate(roi, self.tpl, cv2.TM_CCOEFF_NORMED).max())
+        was = self.in_run
         self.in_run = self.score >= self.cfg.threshold
+        if self.in_run and not was and self._last_grab is not None:
+            self.run_starts.append((self._last_grab + t0) / 2)   # appeared between the two grabs
+        self._last_grab = t0
         self.updated = time.perf_counter()
         return self.in_run
 
@@ -135,3 +141,65 @@ class GameStateWatcher:
 
     def close(self):
         self.running = False
+
+
+class RunStarter:
+    """Starts a run by tapping what is actually on screen: the PLAY button, or a "Tap to continue"
+    overlay in front of it. Never taps blindly: other popups (e.g. "Continue? (watch ad)") are
+    left alone until they time out. Runs in the background; `busy` while trying."""
+
+    def __init__(self, cfg: StartCfg, gate: GameStateWatcher, serial: str, screen: tuple[int, int]):
+        self.cfg, self.gate, self.serial = cfg, gate, serial
+        self.w, self.h = screen
+        s = gate.SCALE * self.w / 1080   # templates were cut from a 1080-wide screen
+        self.tpls = []
+        for name in (cfg.play_template, cfg.continue_template):
+            t = cv2.imread(str(resolve(name)), cv2.IMREAD_GRAYSCALE)
+            if t is None:
+                raise FileNotFoundError(name)
+            self.tpls.append((Path(name).stem, cv2.resize(t, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)))
+        self.busy = False
+        self.status = ""
+
+    def trigger(self) -> bool:
+        if self.busy or self.gate.in_run:
+            return False
+        self.busy = True
+        threading.Thread(target=self._run, daemon=True).start()
+        return True
+
+    def find(self, img) -> tuple[str, int, int] | None:
+        """(template name, x, y in device pixels) of the best visible start button, if any."""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        for name, t in self.tpls:
+            _, score, _, (x, y) = cv2.minMaxLoc(cv2.matchTemplate(gray, t, cv2.TM_CCOEFF_NORMED))
+            if score >= self.cfg.threshold:
+                return name, int((x + t.shape[1] / 2) / self.gate.SCALE), int((y + t.shape[0] / 2) / self.gate.SCALE)
+        return None
+
+    def _run(self):
+        try:
+            deadline = time.perf_counter() + self.cfg.timeout_s
+            self.status = "looking for PLAY"
+            prev = None
+            while time.perf_counter() < deadline and not self.gate.in_run:
+                hit = self.find(self.gate.screen.grab())
+                # tap only once the button is in the same place twice in a row: taps on a screen
+                # that is still sliding in are ignored by the game
+                stable = hit is not None and prev is not None and hit[0] == prev[0] \
+                    and abs(hit[1] - prev[1]) + abs(hit[2] - prev[2]) <= 8
+                prev = hit
+                if stable:
+                    name, x, y = hit
+                    prev = None
+                    self.status = f"tapping {name.replace('_', ' ')}"
+                    subprocess.run([ADB, "-s", self.serial, "shell", "input", "tap", str(x), str(y)],
+                                   capture_output=True, timeout=5)
+                    time.sleep(1.0)   # let the screen change before looking again
+                else:
+                    time.sleep(0.25)
+            self.status = "run started" if self.gate.in_run else "no PLAY button found"
+        except Exception as e:  # noqa: BLE001
+            self.status = f"start failed: {e}"
+        finally:
+            self.busy = False

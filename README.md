@@ -54,8 +54,10 @@ Steps that need you (one time):
 ./run.sh --help       # all options
 ```
 
-**Screen layout matters.** `start_emulator.sh` parks the emulator window at the top-left, and the
-camera preview opens to its right.
+**Screen layout.** The game is parked full-height on the right of the main display (a TV works
+well) and the camera preview fills the rest, so you can see the lane lines while you play
+(`preview.layout: split`, `preview.game_side: right|left`; `manual` uses `preview.x/y/width`).
+The camera is picked by name (`camera.name: "USB Webcam"`), falling back to `camera.index`.
 
 **Keep the emulator window uncovered.** macOS throttles a covered emulator to 12–15 fps, versus
 60 fps when visible. That adds 50–100 ms of lag per frame and makes the game miss swipes. The
@@ -63,8 +65,10 @@ preview shows the game's live fps, in red with a warning if it drops.
 
 **How to play:**
 
-1. Start a run in the game, by clicking "Tap to Play" / PLAY with the mouse.
-2. Stand in your play position with shoulders and hips in view. Hold still about 2 s until the calibration bar fills.
+1. Stand in the middle of the camera view with shoulders and hips in view. Hold still about 2 s until the calibration bar fills.
+2. **Raise both hands above your head** (hold ~0.4 s) to start a run. It taps the PLAY button, or a
+   "Tap to continue" overlay in front of it, only when it can see one. After a crash, PLAY takes about
+   10 s to appear (the "Continue?" popup times out by itself), and it waits for it. You can also click PLAY with the mouse.
 3. Play.
 
 **Recalibrate** with `c` whenever you change position.
@@ -80,6 +84,7 @@ the screen, it holds swipes; it never sends them blindly.
 * `q` / `Esc`: quit
 * `c`: recalibrate
 * `space`: pause/resume sending swipes
+* `d`: show/hide the debug view (skeleton, trigger lines, stats); hidden by default (`preview.debug`)
 
 **The overlay shows:**
 
@@ -100,6 +105,44 @@ the screen, it holds swipes; it never sends them blindly.
 * `--video file.mp4`: runs on a recording instead of the webcam
 * `--method scrcpy`: uses another injector
 * `--no-gate`: disables the run guard (not recommended)
+
+## Recording a session (for videos)
+
+```bash
+./run.sh --record     # play as usual; everything goes to recordings/<date_time>/
+```
+
+| File | What |
+|---|---|
+| `camera.mp4` | the clean webcam feed, 1280×720, 30 fps (not mirrored) |
+| `overlay.mp4` | the preview as on screen (mirrored, lane lines) |
+| `game.mp4` | the emulator screen at full resolution, 1080×2400, 60 fps (scrcpy; the game stays at 60 fps) |
+| `markers.json` | start time, each hands-up round start (file time and time of day), and how the game video was aligned |
+
+All three videos start at the same instant and are the same length, so they line up at 0 in any
+editor. The game video is aligned by matching every run start in it with the moment the run guard
+saw it live (within about 15 ms).
+
+**Syncing another camera, silently.** Every file has a time-of-day timecode from the Mac's clock.
+Record the other camera with time-of-day timecode too (on an iPhone, for example the Blackmagic
+Camera app's timecode setting), then in Premiere select the clips and choose *Synchronize →
+Timecode*. Phone and Mac clocks are both network-synced but can differ by a frame or two. To check
+or fine-tune, the preview flashes white when recording starts and at each hands-up round start;
+film the TV in the other shot and match the flash.
+
+**Or let the scripts sync it.** For clips without timecode (or to double-check):
+
+```bash
+.venv/bin/python edit/sync_angles.py ~/Downloads/Angle_1.mov ~/Downloads/Angle_2.mov
+.venv/bin/python edit/make_premiere_xml.py     # -> recordings/SubwaySurfers_edit.xml
+```
+
+`sync_angles.py` matches each clip to its session by your body's up/down motion (pose tracking on
+both videos, cross-correlated) and writes `recordings/<session>/angles.json`. `make_premiere_xml.py`
+builds one vertical 60 fps sequence with every take back to back, each view on its own track
+(V1 game, V2 overlay, V3 camera, V4 other angle), in sync and untouched, with a marker at every
+take and round. In Premiere: *File → Import* the XML, then double-click the sequence in the Project
+panel (dragging it onto a timeline nests it).
 
 ## How lanes work
 
@@ -154,7 +197,8 @@ The current values were tuned this way on two recorded sessions (2026-10-12).
 
 | Symptom | Change |
 |---|---|
-| Lanes too wide (big steps needed) | narrow the middle lane: `lanes.boundaries: [0.38, 0.62]` |
+| Lanes too wide (big steps needed) | narrow the middle lane, e.g. `lanes.boundaries: [0.46, 0.54]` (current; thirds = `[0.333, 0.667]`) |
+| Lanes switch when you only sway | widen the middle lane (`[0.42, 0.58]`) or raise `lanes.hysteresis` |
 | Lane flickers when standing near a line | raise `lanes.hysteresis` (0.03 → 0.05) |
 | Lane switches too late | raise `lanes.lead` or `lookahead_s` |
 | (lean mode) lean doesn't register | lower `gestures.left/right.trigger` (0.32 → 0.26) or `min_velocity` (0.8 → 0.6) |
@@ -206,7 +250,7 @@ Unity samples touches once per frame, so the finger must be seen moving on at le
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q        # 88 tests, ~35 s
+.venv/bin/python -m pytest -q        # 93 tests, ~45 s
 ```
 
 * `tests/test_detector.py`: synthetic landmark sequences covering:
@@ -232,6 +276,8 @@ Unity samples touches once per frame, so the finger must be seen moving on at le
 | `bench/drive_game_with_video.py` | full live pipeline from a gesture video into a real game run |
 | `bench/analyze_recording.py` | tuning report from a `--record-landmarks` session |
 | `bench/score_guided.py` | scores a `--guided` session against a config (try changes on the same recording) |
+| `edit/sync_angles.py` | syncs other-camera clips to recorded sessions by body motion |
+| `edit/make_premiere_xml.py` | Premiere project (FCP7 XML) with all takes and views synced |
 
 ## Troubleshooting
 

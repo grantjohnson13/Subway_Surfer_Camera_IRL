@@ -18,6 +18,8 @@ CFG = load_config()
 CFG.lateral_mode = "lean"   # the tests below exercise lean mode; lanes mode has its own section
 LANES = copy.deepcopy(CFG)
 LANES.lateral_mode = "lanes"
+LANES.lanes.boundaries = [0.333, 0.667]   # geometry the lane tests below are written for
+LANES.lanes.hysteresis = 0.03
 FPS_OPTIONS = (30, 60)
 
 
@@ -230,13 +232,14 @@ def test_distance_invariance(torso_px):
         assert names(run(keys, cam=cam)) == [g]
 
 
-@pytest.mark.parametrize("amount", [0.25])
+@pytest.mark.parametrize("amount", [0.2])   # the fast filter (min_cutoff 5 Hz) lets 0.25 through
 def test_too_small_lean_ignored(amount):
     assert run(synth.lean("left", amount=amount)) == []
 
 
 def test_small_hop_ignored():
-    assert run(synth.jump(height=0.12, landing_squat=0.05)) == []
+    # fast filter (min_cutoff 5 Hz, beta 1.0) trades a smaller dead zone for ~20 ms earlier jumps
+    assert run(synth.jump(height=0.10, landing_squat=0.04)) == []
 
 
 def test_full_sequence_every_gesture_once():
@@ -379,3 +382,27 @@ def test_vertical_baseline_corrects_while_lean_is_held():
             Key(t0 + 8.0, dx=-1.0, dy=-0.15), Key(t0 + 8.3, dx=-1.0, dy=-0.25),
             Key(t0 + 8.6, dx=-1.0, dy=-0.15), Key(t0 + 10, dx=-1.0, dy=-0.15)]
     assert names(run(keys)) == ["left"]
+
+
+def test_lanes_narrow_middle_from_config():
+    # config.yaml narrows the middle lane well inside the thirds: a small step changes lane there
+    narrow = copy.deepcopy(LANES)
+    narrow.lanes = copy.deepcopy(load_config().lanes)
+    assert narrow.lanes.boundaries[1] - narrow.lanes.boundaries[0] < 0.2
+    assert names(run(step(-0.7, hold_s=3.0, back=False), cfg=LANES)) == []
+    assert names(run(step(-0.7, hold_s=3.0, back=False), cfg=narrow)) == ["left"]
+    assert names(run(step(-0.7, hold_s=3.0, back=True), cfg=narrow)) == ["left", "right"]
+
+
+def test_hands_up():
+    from sscam.detector import hands_up
+    lms = [[0.5, 0.5, 1.0] for _ in range(33)]
+    lms[0] = [0.5, 0.3, 1.0]                                   # nose
+    lms[15], lms[16] = [0.4, 0.6, 1.0], [0.6, 0.6, 1.0]        # wrists at the hips
+    assert not hands_up(lms)
+    lms[15] = [0.4, 0.1, 1.0]                                  # one hand up
+    assert not hands_up(lms)
+    lms[16] = [0.6, 0.1, 1.0]                                  # both up
+    assert hands_up(lms)
+    lms[16] = [0.6, 0.1, 0.2]                                  # not visible -> not up
+    assert not hands_up(lms)

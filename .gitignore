@@ -16,4 +16,5 @@ tools/swipetest/*.idsig
 # Local session output (recorded landmark sessions, emulator logs, screenshots)
 logs/
 evidence/
+recordings/
 *.egg-info/

@@ -17,9 +17,9 @@ import cv2
 import numpy as np
 
 from .config import ROOT, load_config
-from .detector import Calibrator, GestureDetector, sample_from_landmarks
-from .gamestate import GameStateWatcher
-from .injectors import GESTURE_TO_SWIPE, AsyncSwiper, NullInjector, make_injector, start_best
+from .detector import Calibrator, GestureDetector, hands_up, sample_from_landmarks
+from .gamestate import GameStateWatcher, RunStarter
+from .injectors import GESTURE_TO_SWIPE, AsyncSwiper, NullInjector, make_injector, screen_size, start_best
 from .pose import CONNECTIONS, PoseTracker
 
 COLORS = {"left": (255, 160, 0), "right": (0, 160, 255), "jump": (0, 220, 0), "duck": (0, 0, 255)}
@@ -65,6 +65,26 @@ def draw_prompt(img, text: str, remaining: float):
     org = ((w - size[0]) // 2, h - 75)
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 2.0, (255, 255, 255), 5, cv2.LINE_AA)
     cv2.rectangle(img, (0, h - 46), (int(w * min(1.0, remaining)), h - 40), (0, 255, 255), -1)
+
+
+def place_windows(pcfg, aspect: float) -> tuple[int, int, int]:
+    """Preview (x, y, width). In split layout also parks the emulator on its side of the screen."""
+    if pcfg.layout == "split":
+        from .layout import display_size, emulator_bounds, place_emulator, preview_rect
+        try:
+            screen = display_size()
+        except Exception:  # noqa: BLE001
+            screen = None
+        if screen:
+            try:
+                return preview_rect(screen, place_emulator(pcfg.game_side, screen), aspect)
+            except Exception as e:  # noqa: BLE001
+                print(f"[sscam] could not move the emulator window ({e})", file=sys.stderr)
+            emu = emulator_bounds()   # leave it where it is, and keep the preview off it
+            if emu:
+                x, y, w, h = emu
+                return preview_rect(screen, (x, y, w + 58, h), aspect)
+    return pcfg.x, pcfg.y, pcfg.width
 
 
 # --------------------------------------------------------------------------- frame sources
@@ -161,7 +181,8 @@ class VideoSource:
 # --------------------------------------------------------------------------- overlay
 def draw_overlay(img, lms, cal: Calibrator, det: GestureDetector | None, frame, hud: dict, cfg):
     h, w = img.shape[:2]
-    if lms is not None:
+    debug = hud.get("debug", True)   # False: just you and the lane lines (toggle with d)
+    if lms is not None and debug:
         pts = []
         for lm in lms:
             pts.append((int(lm.x * w), int(lm.y * h)) if (lm.visibility or 0) > 0.3 else None)
@@ -181,7 +202,7 @@ def draw_overlay(img, lms, cal: Calibrator, det: GestureDetector | None, frame, 
             ov = img.copy()
             cv2.rectangle(ov, (x0, 0), (x1, h), (0, 255, 255), -1)
             cv2.addWeighted(ov, 0.12, img, 0.88, 0, img)
-    if det is not None:
+    if det is not None and debug:
         b = det.base
         bx, by, T = int(b.cx), int(b.cy), b.torso
         g = cfg.gestures
@@ -205,6 +226,12 @@ def draw_overlay(img, lms, cal: Calibrator, det: GestureDetector | None, frame, 
         cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 4, cv2.LINE_AA)
         cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
+    if not debug:
+        if det is None:   # calibrating: the only thing shown besides the lanes
+            text(cal.message, 40, (0, 255, 255), 0.9, x=20)
+            cv2.rectangle(img, (20, 56), (20 + int(300 * cal.progress), 70), (0, 255, 255), -1)
+            cv2.rectangle(img, (20, 56), (320, 70), (255, 255, 255), 1)
+        return
     y = 24
     mode = "DRY RUN (no input sent)" if hud["dry_run"] else f"LIVE -> {hud['method']}"
     if hud.get("paused"):
@@ -223,6 +250,11 @@ def draw_overlay(img, lms, cal: Calibrator, det: GestureDetector | None, frame, 
                 text("emulator throttled - keep its window uncovered", y, (0, 0, 255), x=260)
         else:
             text(f"game: not in a run - swipes held ({hud['suppressed']} held)", y, (0, 200, 255))
+            st = hud.get("starter")
+            if st is not None:
+                y += 24
+                msg = st.status if st.busy or st.status else "raise both hands to start a run"
+                text(msg if not hud.get("hands_up") or st.busy else "hands up - hold...", y, (0, 255, 255))
     y += 24
     lat = hud["latency"]
     if lat:
@@ -275,6 +307,8 @@ def main(argv=None) -> int:
     ap.add_argument("--record-landmarks", help="write per-frame torso landmarks (JSONL) for replay tests")
     ap.add_argument("--guided", action="store_true",
                     help="tuning session: on-screen prompts after calibration; prompts are logged to --events")
+    ap.add_argument("--record", action="store_true",
+                    help="record camera, preview and game into recordings/<date_time>/, time-of-day timecoded")
     ap.add_argument("--no-gate", action="store_true",
                     help="send swipes even when no run is in progress (unsafe: menus have ad/shop buttons)")
     args = ap.parse_args(argv)
@@ -284,6 +318,13 @@ def main(argv=None) -> int:
         args.events = str(ROOT / "logs/guided_events.jsonl")
     if args.camera is not None:
         cfg.camera.index = args.camera
+    elif cfg.camera.name and not args.video:
+        from .layout import camera_index_by_name
+        idx = camera_index_by_name(cfg.camera.name)
+        if idx is None:
+            print(f"[sscam] no camera named {cfg.camera.name!r}; using camera {cfg.camera.index}", file=sys.stderr)
+        else:
+            cfg.camera.index = idx
     if args.method:
         cfg.injector.method = args.method
 
@@ -298,6 +339,8 @@ def main(argv=None) -> int:
 
     # Only swipe while a run is in progress (menus/dialogs have ad and shop buttons where swipes land)
     gate = None
+    if args.record:
+        cfg.game_gate.interval_s = min(cfg.game_gate.interval_s, 0.03)   # sharper run-start times for sync
     if not args.dry_run and cfg.game_gate.enabled and not args.no_gate:
         try:
             gate = GameStateWatcher(cfg.game_gate, cfg.injector.console_port, injector.screen,
@@ -306,6 +349,28 @@ def main(argv=None) -> int:
             print(f"[sscam] game-state guard unavailable ({e}); refusing to send swipes blindly. "
                   "Start the emulator with scripts/start_emulator.sh, or pass --no-gate.", file=sys.stderr)
             return 2
+    starter = None
+    if gate is not None and cfg.start.enabled:
+        starter = RunStarter(cfg.start, gate, cfg.injector.serial, injector.screen)
+
+    # ---- recording
+    session = None
+    if args.record:
+        from .recorder import Session, available
+        why = available()
+        if why:
+            print(f"[sscam] cannot record: {why}", file=sys.stderr)
+            return 2
+        if gate is None and not args.video:   # dry run: watch the game anyway, to align game.mp4
+            try:
+                gate = GameStateWatcher(cfg.game_gate, cfg.injector.console_port, screen_size(cfg.injector.serial),
+                                        serial=cfg.injector.serial).start()
+            except Exception as e:  # noqa: BLE001
+                print(f"[sscam] game not reachable ({e}); recording the camera only", file=sys.stderr)
+        session = Session(cfg.record, cfg.injector.serial if gate is not None else None,
+                          record_game=cfg.record.game and gate is not None)
+        if gate is not None:
+            session.gate_template = (gate.tpl, gate.cfg.threshold)
 
     latencies: deque[float] = deque(maxlen=200)
     all_latencies: list[float] = []
@@ -348,7 +413,8 @@ def main(argv=None) -> int:
 
     hud = {"dry_run": args.dry_run, "method": method, "fps": 0.0, "pose_ms": 0.0, "age_ms": 0.0,
            "latency": latencies, "counts": Counter({g: 0 for g in COLORS}), "paused": False,
-           "last_gesture": None, "gate": gate, "suppressed": 0}
+           "last_gesture": None, "gate": gate, "suppressed": 0, "starter": starter, "hands_up": False,
+           "debug": cfg.preview.debug}
     pose_ms_hist: deque[float] = deque(maxlen=60)
     age_hist: list[float] = []
     frame_times: deque[float] = deque(maxlen=60)
@@ -356,6 +422,7 @@ def main(argv=None) -> int:
     n_frames = 0
     last_seq = 0
     frame = None
+    hands_since, hands_fired = None, False
     window = "Subway Surfers camera controller"
     preview = not args.no_preview
     exit_code = 0
@@ -368,6 +435,8 @@ def main(argv=None) -> int:
                 print("[sscam] camera stalled (no frame for 1 s)", file=sys.stderr)
                 continue
             last_seq, t_cap, img = got
+            if session:
+                session.frame(img if cfg.camera.mirror else img.copy(), t_cap)
             n_frames += 1
             frame_times.append(t_cap)
             if len(frame_times) > 1:
@@ -384,6 +453,20 @@ def main(argv=None) -> int:
             hud["pose_ms"] = statistics.median(pose_ms_hist)
             # landmarks are normalized, so measure in full-frame pixels
             sample = sample_from_landmarks(t_det, lms, w, h, cfg.pose.min_visibility) if lms else None
+            # ---- both hands above the head (held) outside a run: press PLAY
+            if cfg.start.enabled and hands_up(lms, cfg.pose.min_visibility):
+                hands_since = t_det if hands_since is None else hands_since
+                hud["hands_up"] = True
+                if t_det - hands_since >= cfg.start.hold_s and not hands_fired:
+                    hands_fired = True
+                    if session and (gate is None or not gate.in_run):
+                        session.marker("round", t_cap)
+                    if starter is not None and starter.trigger():
+                        print("[sscam] hands up -> starting a run", flush=True)
+                    elif args.dry_run:
+                        print("[sscam] hands up (dry run: would start a run)", flush=True)
+            else:
+                hands_since, hands_fired, hud["hands_up"] = None, False, False
             if rec_f:
                 rec_f.write(json.dumps({"t": round(t_det, 4), "w": w, "h": h, "lms": None if lms is None else
                                         [[round(l.x, 5), round(l.y, 5), round(l.visibility or 0, 3)] for l in lms]}) + "\n")
@@ -454,9 +537,13 @@ def main(argv=None) -> int:
                     draw_prompt(img, *hud["prompt"])
                 if n_frames == 1:
                     # beside the emulator, never on top of it (macOS throttles a covered emulator to ~15 fps)
+                    px, py, pw = place_windows(cfg.preview, w / h)
                     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow(window, cfg.preview.width, int(cfg.preview.width * h / w))
-                    cv2.moveWindow(window, cfg.preview.x, cfg.preview.y)
+                    cv2.resizeWindow(window, pw, int(pw * h / w))
+                    cv2.moveWindow(window, px, py)
+                if session:
+                    session.decorate(img, t_cap)
+                    session.overlay(img, t_cap)
                 cv2.imshow(window, img)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
@@ -466,6 +553,8 @@ def main(argv=None) -> int:
                     det, frame = None, None
                 if key == ord(" "):
                     hud["paused"] = not hud["paused"]
+                if key == ord("d"):
+                    hud["debug"] = not hud["debug"]
             if args.duration and time.perf_counter() - t_start >= args.duration:
                 break
     except KeyboardInterrupt:
@@ -477,6 +566,8 @@ def main(argv=None) -> int:
         elapsed = time.perf_counter() - t_start
         time.sleep(0.2)  # let the last swipe finish
         swiper.close()
+        if session:
+            session.finish(gate.run_starts if gate is not None else [])
         if gate is not None:
             gate.close()
         src.close()

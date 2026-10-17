@@ -30,6 +30,24 @@ class BodySample:
     w: float = 0.0           # frame width in pixels (lanes mode divides it into lanes)
 
 
+NOSE, L_WRIST, R_WRIST = 0, 15, 16
+
+
+def hands_up(lms, min_visibility: float = 0.5) -> bool:
+    """Both wrists raised above the nose (the "start a run" gesture)."""
+    if lms is None:
+        return False
+    pts = []
+    for i in (NOSE, L_WRIST, R_WRIST):
+        lm = lms[i]
+        x, y, vis = (lm.x, lm.y, lm.visibility if lm.visibility is not None else 1.0) if hasattr(lm, "x") else lm
+        if vis < min_visibility:
+            return False
+        pts.append(y)
+    nose, lw, rw = pts
+    return lw < nose and rw < nose
+
+
 def sample_from_landmarks(t: float, lms, width: int, height: int, min_visibility: float = 0.5
                           ) -> BodySample | None:
     """Build a BodySample from 33 normalized landmarks (objects with x, y, visibility, or

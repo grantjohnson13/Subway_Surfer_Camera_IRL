@@ -6,7 +6,8 @@
 # Velocities are torso lengths per second.
 
 camera:
-  index: 0                 # cv2.VideoCapture index (0 = built-in FaceTime camera)
+  name: "USB Webcam"        # pick the camera whose name contains this (empty = use index); falls back to index
+  index: 0                 # cv2.VideoCapture index (0 = built-in camera); --camera N overrides both
   width: 1280
   height: 720
   fps: 60                  # requested; the camera may deliver less (shown in preview)
@@ -27,8 +28,8 @@ calibration:
   min_torso_px: 40         # refuse to calibrate if you are tiny in frame (too far away)
 
 filter:                    # One-Euro filter on torso centre: low jitter when still, low lag when moving
-  min_cutoff_hz: 2.5       # lower = smoother when still (more lag)
-  beta: 0.5                # higher = less lag during fast movement
+  min_cutoff_hz: 5.0       # lower = smoother when still (more lag)
+  beta: 1.0                # higher = less lag during fast movement
   d_cutoff_hz: 4.0         # smoothing of the velocity estimate
 
 # Left/right control:
@@ -38,8 +39,8 @@ filter:                    # One-Euro filter on torso centre: low jitter when st
 #   lean:  each lean/step (relative to your calibrated position) is one lane change, then you return.
 lateral_mode: lanes
 lanes:
-  boundaries: [0.333, 0.667]  # lane lines as fractions of frame width (narrow the middle lane: [0.38, 0.62])
-  hysteresis: 0.03            # projected position must be this far past a line (fraction of width) - no flicker
+  boundaries: [0.46, 0.54]    # lane lines as fractions of frame width; default thirds = [0.333, 0.667]
+  hysteresis: 0.02            # projected position must be this far past a line (fraction of width) - no flicker
   lead: 0.04                  # a fast move may switch this far BEFORE reaching the line (fires early)
   resync_delay_s: 1.0         # after a run starts (runner in the middle lane), wait out the intro, then match your lane
 
@@ -118,10 +119,39 @@ game_gate:
   interval_s: 0.10         # how often to check (gRPC screenshot ~3-8 ms)
   max_age_s: 0.8
 
-# Preview window placement (screen points). It sits to the RIGHT of the emulator window, which
-# scripts/start_emulator.sh parks at the top-left: macOS throttles the emulator to ~12-15 fps
-# when its window is covered, and runs it at 60 fps when visible.
+# Raise both hands above your head (held hold_s) to start a run: taps the PLAY button, or dismisses a
+# "Tap to continue" overlay first. Only taps buttons it can see (template match), never blindly;
+# popups like "Continue? (watch ad)" are left to time out by themselves.
+start:
+  enabled: true
+  hold_s: 0.4
+  timeout_s: 25.0          # keep looking for PLAY this long (after a crash it takes ~12 s to appear)
+  play_template: assets/play_button.png
+  continue_template: assets/tap_to_continue.png
+  threshold: 0.8
+
+# ./run.sh --record: one folder per session (recordings/<date_time>/) with camera.mp4 (clean webcam),
+# overlay.mp4 (the preview), game.mp4 (emulator, full resolution) - all starting at the same instant -
+# plus markers.json. Silent sync: every file has a time-of-day timecode from the Mac's clock (record
+# the other camera with time-of-day timecode too, then Synchronize > Timecode in Premiere); the
+# preview shows a clock and flashes white at the start and each hands-up round start.
+record:
+  dir: recordings
+  fps: 30                  # camera.mp4 / overlay.mp4 frame rate (the webcam delivers 30)
+  bitrate: 12M
+  game: true               # record the emulator screen with scrcpy (does not slow the game: measured 60 fps)
+  game_bitrate: 16M
+  keep_raw: false          # keep the unprocessed *_raw.mp4 files too
+
+# Window layout (screen points), for playing on a TV/monitor.
+#   split:  the emulator is parked full-height on `game_side` of the main display and the camera
+#           preview fills the rest, so the game is never covered (macOS throttles a covered emulator
+#           to ~12-15 fps; it runs at 60 fps when visible).
+#   manual: the preview goes at x/y/width and the emulator stays where scripts/start_emulator.sh put it.
 preview:
+  layout: split
+  game_side: right
+  debug: false            # false: the preview shows just you and the lane lines; true: skeleton, stats (key d toggles)
   x: 470
   y: 40
   width: 1240

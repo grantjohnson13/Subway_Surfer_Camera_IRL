@@ -16,6 +16,7 @@ GESTURES = ("left", "right", "jump", "duck")
 @dataclass
 class CameraCfg:
     index: int = 0
+    name: str = ""
     width: int = 1280
     height: int = 720
     fps: int = 60
@@ -85,6 +86,9 @@ class InjectorCfg:
 
 @dataclass
 class PreviewCfg:
+    layout: str = "split"
+    game_side: str = "right"
+    debug: bool = False
     x: int = 470
     y: int = 40
     width: int = 1240
@@ -97,6 +101,26 @@ class GameGateCfg:
     threshold: float = 0.75
     interval_s: float = 0.10
     max_age_s: float = 0.8
+
+
+@dataclass
+class StartCfg:
+    enabled: bool = True
+    hold_s: float = 0.4
+    timeout_s: float = 25.0
+    play_template: str = "assets/play_button.png"
+    continue_template: str = "assets/tap_to_continue.png"
+    threshold: float = 0.8
+
+
+@dataclass
+class RecordCfg:
+    dir: str = "recordings"
+    fps: int = 30
+    bitrate: str = "12M"
+    game: bool = True
+    game_bitrate: str = "16M"
+    keep_raw: bool = False
 
 
 @dataclass
@@ -117,6 +141,8 @@ class Config:
     baseline_adapt_max_velocity: float = 0.35
     injector: InjectorCfg = field(default_factory=InjectorCfg)
     game_gate: GameGateCfg = field(default_factory=GameGateCfg)
+    start: StartCfg = field(default_factory=StartCfg)
+    record: RecordCfg = field(default_factory=RecordCfg)
     preview: PreviewCfg = field(default_factory=PreviewCfg)
 
 
@@ -141,6 +167,8 @@ def _build(cls, data: dict[str, Any]):
     cfg = cls(**kwargs)
     if cls is Config and cfg.lateral_mode not in ("lanes", "lean"):
         raise ValueError(f"lateral_mode must be 'lanes' or 'lean', not {cfg.lateral_mode!r}")
+    if cls is PreviewCfg and (cfg.layout not in ("split", "manual") or cfg.game_side not in ("left", "right")):
+        raise ValueError("preview.layout must be 'split' or 'manual' and preview.game_side 'left' or 'right'")
     return cfg
 
 
